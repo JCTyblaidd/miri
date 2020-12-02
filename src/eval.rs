@@ -156,7 +156,7 @@ pub fn create_ecx<'mir, 'tcx: 'mir>(
         }
         // Store command line as UTF-16 for Windows `GetCommandLineW`.
         {
-            // Construct a command string with all the aguments.
+            // Construct a command string with all the arguments.
             let mut cmd = String::new();
             for arg in config.args.iter() {
                 if !cmd.is_empty() {
@@ -195,7 +195,7 @@ pub fn create_ecx<'mir, 'tcx: 'mir>(
 
 /// Evaluates the main function specified by `main_id`.
 /// Returns `Some(return_code)` if program executed completed.
-/// Returns `None` if an evaluation error occured.
+/// Returns `None` if an evaluation error occurred.
 pub fn eval_main<'tcx>(tcx: TyCtxt<'tcx>, main_id: DefId, config: MiriConfig) -> Option<i64> {
     // Copy setting before we move `config`.
     let ignore_leaks = config.ignore_leaks;
@@ -246,7 +246,7 @@ pub fn eval_main<'tcx>(tcx: TyCtxt<'tcx>, main_id: DefId, config: MiriConfig) ->
     match res {
         Ok(return_code) => {
             if !ignore_leaks {
-                info!("Additonal static roots: {:?}", ecx.machine.static_roots);
+                info!("Additional static roots: {:?}", ecx.machine.static_roots);
                 let leaks = ecx.memory.leak_report(&ecx.machine.static_roots);
                 if leaks != 0 {
                     tcx.sess.err("the evaluated program leaked memory");

@@ -244,7 +244,7 @@ fn cond_set_clock_id<'mir, 'tcx: 'mir>(
 }
 
 /// Try to reacquire the mutex associated with the condition variable after we
-/// were signaled.
+/// were signalled.
 fn reacquire_cond_mutex<'mir, 'tcx: 'mir>(
     ecx: &mut MiriEvalContext<'mir, 'tcx>,
     thread: ThreadId,
@@ -322,7 +322,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
             //
             // To distinguish these two cases in already constructed mutexes, we
             // use the same trick as glibc: for the case when
-            // `pthread_mutexattr_settype` is caled explicitly, we set the
+            // `pthread_mutexattr_settype` is called explicitly, we set the
             // `PTHREAD_MUTEX_NORMAL_FLAG` flag.
             let normal_kind = kind.to_i32()? | PTHREAD_MUTEX_NORMAL_FLAG;
             // Check that after setting the flag, the kind is distinguishable

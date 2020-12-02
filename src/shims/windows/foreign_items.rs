@@ -65,7 +65,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
             }
             "WriteFile" => {
                 let &[handle, buf, n, written_ptr, overlapped] = check_arg_count(args)?;
-                this.read_scalar(overlapped)?.to_machine_usize(this)?; // this is a poiner, that we ignore
+                this.read_scalar(overlapped)?.to_machine_usize(this)?; // this is a pointer, that we ignore
                 let handle = this.read_scalar(handle)?.to_machine_isize(this)?;
                 let buf = this.read_scalar(buf)?.check_init()?;
                 let n = this.read_scalar(n)?.to_u32()?;
@@ -295,7 +295,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
                 assert_eq!(this.get_total_thread_count(), 1, "concurrency on Windows is not supported");
                 // Nothing to do, not even a return value.
                 // (Windows locks are reentrant, and we have only 1 thread,
-                // so not doing any futher checks here is at least not incorrect.)
+                // so not doing any further checks here is at least not incorrect.)
             }
             "TryEnterCriticalSection"
             if this.frame().instance.to_string().starts_with("std::sys::windows::") => {

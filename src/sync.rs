@@ -121,7 +121,7 @@ struct Condvar {
     waiters: VecDeque<CondvarWaiter>,
     /// Tracks the happens-before relationship
     /// between a cond-var signal and a cond-var
-    /// wait during a non-suprious signal event.
+    /// wait during a non-spurious signal event.
     /// Contains the clock of the last thread to
     /// perform a futex-signal.
     data_race: VClock,
@@ -270,7 +270,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
                 .expect("invariant violation: lock_count == 0 iff the thread is unlocked");
             if mutex.lock_count == 0 {
                 mutex.owner = None;
-                // The mutex is completely unlocked. Try transfering ownership
+                // The mutex is completely unlocked. Try transferring ownership
                 // to another thread.
                 if let Some(data_race) = &this.memory.extra.data_race {
                     data_race.validate_lock_release(&mut mutex.data_race, current_owner);
@@ -288,7 +288,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
     /// Put the thread into the queue waiting for the mutex.
     fn mutex_enqueue_and_block(&mut self, id: MutexId, thread: ThreadId) {
         let this = self.eval_context_mut();
-        assert!(this.mutex_is_locked(id), "queing on unlocked mutex");
+        assert!(this.mutex_is_locked(id), "queuing on unlocked mutex");
         this.machine.threads.sync.mutexes[id].queue.push_back(thread);
         this.block_thread(thread);
     }

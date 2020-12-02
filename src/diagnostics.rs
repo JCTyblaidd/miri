@@ -234,7 +234,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
         }
     }
 
-    /// Emit all diagnostics that were registed with `register_diagnostics`
+    /// Emit all diagnostics that were registered with `register_diagnostics`
     fn process_diagnostics(&self, info: TopFrameInfo<'tcx>) {
         let this = self.eval_context_ref();
         DIAGNOSTICS.with(|diagnostics| {

@@ -94,7 +94,7 @@ pub fn futex<'tcx>(
                 // The value still matches, so we block the trait make it wait for FUTEX_WAKE.
                 this.block_thread(thread);
                 this.futex_wait(futex_ptr, thread);
-                // Succesfully waking up from FUTEX_WAIT always returns zero.
+                // Successfully waking up from FUTEX_WAIT always returns zero.
                 this.write_scalar(Scalar::from_machine_isize(0, this), dest)?;
                 // Register a timeout callback if a timeout was specified.
                 // This callback will override the return value when the timeout triggers.

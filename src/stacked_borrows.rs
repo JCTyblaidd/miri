@@ -573,7 +573,7 @@ trait EvalContextPrivExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
         stacked_borrows.for_each(ptr, size, |ptr, stack, global| stack.grant(ptr, item, global))
     }
 
-    /// Retags an indidual pointer, returning the retagged version.
+    /// Retags an individual pointer, returning the retagged version.
     /// `mutbl` can be `None` to make this a raw pointer.
     fn retag_reference(
         &mut self,
