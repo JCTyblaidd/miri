@@ -286,11 +286,21 @@ fn main() {
                     let count: u32 = match arg.strip_prefix("-Zmiri-max-yield-iterations=").unwrap().parse() {
                         Ok(id) => id,
                         Err(err) => panic!(
-                            "-Zmiri-max-yield-iterations= requires a valid `u32` argument: {}",
+                            "-Zmiri-max-yield-iterations requires a valid `u32` argument: {}",
                             err
                         ),
                     };
                     miri_config.max_yield_count = count;
+                }
+                arg if arg.starts_with("-Zmiri-thread-liveness=") => {
+                    let liveness: u64 = match arg.strip_prefix("-Zmiri-thread-liveness=").unwrap().parse() {
+                        Ok(id) => id,
+                        Err(err) => panic!(
+                            "-Zmiri-thread-liveness requires a valid `u64` argument: {}",
+                            err
+                        )
+                    };
+                    miri_config.thread_liveness = Some(liveness);
                 }
                 _ => {
                     // Forward to rustc.

@@ -276,6 +276,7 @@ impl<'mir, 'tcx> Evaluator<'mir, 'tcx> {
         communicate: bool,
         validate: bool,
         max_yield_count: u32,
+        thread_liveness: Option<u64>,
         layout_cx: LayoutCx<'tcx, TyCtxt<'tcx>>,
     ) -> Self {
         let layouts = PrimitiveLayouts::new(layout_cx)
@@ -294,7 +295,7 @@ impl<'mir, 'tcx> Evaluator<'mir, 'tcx> {
             dir_handler: Default::default(),
             time_anchor: Instant::now(),
             layouts,
-            threads: ThreadManager::new(max_yield_count),
+            threads: ThreadManager::new(max_yield_count, thread_liveness),
             static_roots: Vec::new(),
         }
     }

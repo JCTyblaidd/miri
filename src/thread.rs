@@ -1,7 +1,7 @@
 //! Implements threads.
 
 use std::cell::RefCell;
-use std::collections::hash_map::Entry;
+use std::collections::{BTreeSet, hash_map::Entry};
 use std::convert::TryFrom;
 use std::rc::Rc;
 use std::num::TryFromIntError;
@@ -204,7 +204,7 @@ impl YieldRecordState {
             if *count != *record_iteration - 1 {
                 // Different content - assume progress.
                 *self = YieldRecordState::MadeProgress; 
-            }else{
+            } else {
                 *count = *record_iteration;
             }
         }
@@ -217,10 +217,10 @@ impl YieldRecordState {
         } = self {
             if let Some(range_map) = watch_atomic.get(&alloc_id) {
                 range_map.iter(offset, len).any(|(_, &watch)| watch != 0)
-            }else{
+            } else {
                 false
             }
-        }else{
+        } else {
             // First iteration yield, no wake metadata
             // so only awaken after there are no enabled threads.
             false
@@ -234,10 +234,10 @@ impl YieldRecordState {
         } = self {
             if let Some(count) = watch_sync.get(&sync) {
                 *count != 0
-            }else{
+            } else {
                 false
             }
-        }else{
+        } else {
             // First iteration, no wake metadata.
             false
         }
@@ -249,7 +249,7 @@ impl YieldRecordState {
             record_iteration, ..
         } = self {
             *record_iteration
-        }else{
+        } else {
             0
         }
     }
@@ -260,7 +260,7 @@ impl YieldRecordState {
         } = self {
             // Should watch if either watch hash-set is non-empty
             !watch_atomic.is_empty() || !watch_sync.is_empty()
-        }else{
+        } else {
             false
         }
     }
@@ -271,7 +271,7 @@ impl YieldRecordState {
             record_iteration, ..
         } = self {
             *record_iteration += 1;
-        }else{
+        } else {
             *self = YieldRecordState::Recording {
                 watch_atomic: FxHashMap::default(),
                 watch_sync: FxHashMap::default(),
@@ -287,6 +287,12 @@ pub struct Thread<'mir, 'tcx> {
 
     /// Metadata for blocking on yield operations
     yield_state: YieldRecordState,
+
+    /// Counter of operations for tracking liveness.
+    /// If the thread is blocked this is set to None and
+    /// then updated to the counter of the current minimum
+    /// active liveness counter.
+    liveness_ops: Option<u128>,
 
     /// Name of the thread.
     thread_name: Option<Vec<u8>>,
@@ -329,17 +335,20 @@ impl<'mir, 'tcx> Thread<'mir, 'tcx> {
     }
 
     /// Start the thread yielding. Returns true if this thread has watch metadata.
-    fn on_yield(&mut self, max_yield: u32) -> bool {
+    fn on_yield(&mut self, max_yield: u32, thread: ThreadId, meta: &mut Option<LivenessMetadata>) -> bool {
         let iteration_count = self.yield_state.get_iteration_count();
         let block = if max_yield == 0 {
             // A value of 0 never blocks
             false
-        }else{
+        } else {
             iteration_count >= max_yield
         };
         if block {
             self.state = ThreadState::BlockedOnYield;
-        }else{
+            if let Some(liveness_meta) = meta {
+                liveness_meta.on_thread_blocked(thread, &mut self.liveness_ops);
+            }
+        } else {
             self.state = ThreadState::DelayOnYield;
         }
         self.yield_state.should_watch()
@@ -357,6 +366,7 @@ impl<'mir, 'tcx> Default for Thread<'mir, 'tcx> {
         Self {
             state: ThreadState::Enabled,
             yield_state: YieldRecordState::MadeProgress,
+            liveness_ops: None,
             thread_name: None,
             stack: Vec::new(),
             join_status: ThreadJoinStatus::Joinable,
@@ -401,6 +411,114 @@ impl<'mir, 'tcx> std::fmt::Debug for TimeoutCallbackInfo<'mir, 'tcx> {
     }
 }
 
+
+#[derive(Debug)]
+struct LivenessMetadata {
+
+    /// The maximum liveness.
+    thread_liveness: u64,
+
+    /// Cache of the minimum operation count in liveness_set.
+    min_ops_cache: Option<u128>,
+
+    /// BinaryHeap of the liveness of threads currently not
+    /// active but enabled or non-blocking yielded.
+    /// Threads that are currently blocked are
+    liveness_set: BTreeSet<(u128, ThreadId)>,
+}
+impl LivenessMetadata {
+    pub fn new(thread_liveness: u64) -> Self {
+        LivenessMetadata{
+            thread_liveness,
+            min_ops_cache: None,
+            liveness_set: BTreeSet::new()
+        }
+    }
+
+    fn new_thread(&mut self, thread: ThreadId, liveness_ops: &mut Option<u128>) {
+        let min = self.min_counter();
+        *liveness_ops = Some(min);
+        self.liveness_set.insert((min, thread));
+    }
+
+    /// Executed when a thread becomes blocked and so is no
+    /// longer considered for liveness.
+    fn on_thread_blocked(&mut self, thread: ThreadId, liveness_ops: &mut Option<u128>) {
+        if let Some(liveness) = *liveness_ops {
+            // May be present if not currently executing, remove.
+            self.liveness_set.remove(&(liveness, thread));
+        }
+        *liveness_ops = None;
+    }
+
+    /// Increment the threads liveness counter when an operation is executed.
+    fn on_step(&mut self, thread_counter: &mut Option<u128>) {
+        if let Some(counter) = thread_counter {
+            *counter += 1;
+        } else {
+            *thread_counter = Some(self.min_counter())
+        }
+    }
+
+    /// Return the minimum active counter, used
+    /// to ensure fairness when a thread is blocking.
+    fn min_counter(&mut self) -> u128 {
+        let liveness_set = &mut self.liveness_set;
+        let ops = self.min_ops_cache.or_else(|| {
+            liveness_set.first().map(|(ops,_)| *ops)
+        });
+        if let Some(ops) = ops {
+            self.min_ops_cache = Some(ops);
+            ops
+        }else{
+            0
+        }
+    }
+
+    /// Called when a thread has stopped executing but was not blocked.
+    pub fn deschedule_thread(&mut self, thread: ThreadId, liveness_ops: Option<u128>) {
+        if let Some(liveness_ops) = liveness_ops {
+            self.liveness_set.insert((liveness_ops, thread));
+            self.min_ops_cache = None;
+        }
+    }
+    
+    /// Called when a thread is selected for execution.
+    fn schedule_thread(&mut self, thread: ThreadId, liveness_ops: &mut Option<u128>) {
+        if let Some(liveness_ops) = *liveness_ops {
+            assert!(self.liveness_set.remove(&(liveness_ops, thread)));
+            self.min_ops_cache = None;
+        } else {
+            *liveness_ops = Some(self.min_counter());
+        }
+    }
+
+    /// Returns the thread id that should be newly executed if required
+    /// by liveness.
+    fn should_swap_thread(&mut self, current_ops: Option<u128>) -> Option<ThreadId> {
+        if let Some(current_ops) = current_ops {
+            let liveness_set = &mut self.liveness_set;
+            let ops = self.min_ops_cache.or_else(|| {
+                liveness_set.first().map(|(ops,_)| *ops)
+            });
+            if let Some(ops) = ops {
+                self.min_ops_cache = Some(ops);
+                if current_ops >= ops {
+                    let diff = current_ops - ops;
+                    if diff > self.thread_liveness as u128 {
+
+                        // A thread has crossed the required liveness bound
+                        let (min_ops, thread) = *liveness_set.first().unwrap();
+                        assert_eq!(min_ops, ops);
+                        return Some(thread)
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
 /// A set of threads.
 #[derive(Debug)]
 pub struct ThreadManager<'mir, 'tcx> {
@@ -415,6 +533,10 @@ pub struct ThreadManager<'mir, 'tcx> {
     /// The maximum number of yields making no progress required
     /// on all threads to report a live-lock.
     max_yield_count: u32,
+    /// The maximum operations that one thread can perform before all
+    /// other threads must perform at least one operation.
+    /// Also contains the metadata for scheduling threads.
+    thread_liveness: Option<LivenessMetadata>,
     /// This field is pub(crate) because the synchronization primitives
     /// (`crate::sync`) need a way to access it.
     pub(crate) sync: SynchronizationState,
@@ -428,7 +550,7 @@ pub struct ThreadManager<'mir, 'tcx> {
 }
 
 impl<'mir, 'tcx> ThreadManager<'mir, 'tcx> {
-    pub fn new(max_yield_count: u32) -> Self {
+    pub fn new(max_yield_count: u32, thread_liveness: Option<u64>) -> Self {
         let mut threads = IndexVec::new();
         // Create the main thread and add it to the list of threads.
         let mut main_thread = Thread::default();
@@ -440,6 +562,9 @@ impl<'mir, 'tcx> ThreadManager<'mir, 'tcx> {
             threads: threads,
             yielding_thread_set: FxHashSet::default(),
             max_yield_count,
+            thread_liveness: thread_liveness.map(|liveness| {
+                LivenessMetadata::new(liveness)
+            }),
             sync: SynchronizationState::default(),
             thread_local_alloc_ids: Default::default(),
             yield_active_thread: false,
@@ -480,6 +605,9 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
     fn create_thread(&mut self) -> ThreadId {
         let new_thread_id = ThreadId::new(self.threads.len());
         self.threads.push(Default::default());
+        if let Some(meta) = &mut self.thread_liveness {
+            meta.new_thread(new_thread_id, &mut self.threads[new_thread_id].liveness_ops);
+        }
         new_thread_id
     }
 
@@ -551,7 +679,11 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
         self.threads[joined_thread_id].join_status = ThreadJoinStatus::Joined;
         if self.threads[joined_thread_id].state != ThreadState::Terminated {
             // The joined thread is still running, we need to wait for it.
-            self.active_thread_mut().state = ThreadState::BlockedOnJoin(joined_thread_id);
+            let active_thread =  &mut self.threads[self.active_thread];
+            active_thread.state = ThreadState::BlockedOnJoin(joined_thread_id);
+            if let Some(liveness_meta) = &mut self.thread_liveness {
+                liveness_meta.on_thread_blocked(joined_thread_id, &mut active_thread.liveness_ops);
+            }
             trace!(
                 "{:?} blocked on {:?} when trying to join",
                 self.active_thread,
@@ -578,9 +710,13 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
 
     /// Put the thread into the blocked state.
     fn block_thread(&mut self, thread: ThreadId) {
-        let state = &mut self.threads[thread].state;
+        let current_thread = &mut self.threads[thread];
+        let state = &mut current_thread.state;
         assert_eq!(*state, ThreadState::Enabled);
         *state = ThreadState::BlockedOnSync;
+        if let Some(liveness_meta) = &mut self.thread_liveness {
+            liveness_meta.on_thread_blocked(thread, &mut current_thread.liveness_ops);
+        }
     }
 
     /// Put the blocked thread into the enabled state.
@@ -655,6 +791,10 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
         if let Some(data_race) = data_race {
             data_race.thread_terminated();
         }
+        if let Some(liveness_meta) = &mut self.thread_liveness {
+            // For liveness - blocking & termination are the same operation.
+            liveness_meta.on_thread_blocked(self.active_thread, &mut self.threads[self.active_thread].liveness_ops);
+        }
         // Check if we need to unblock any threads.
         for (i, thread) in self.threads.iter_enumerated_mut() {
             if thread.state == ThreadState::BlockedOnJoin(self.active_thread) {
@@ -691,7 +831,7 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
                 thread.state = ThreadState::Enabled;
                 thread.yield_state.on_progress();
                 true
-            }else{
+            } else {
                 false
             }
         });
@@ -718,7 +858,7 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
                 thread.state = ThreadState::Enabled;
                 thread.yield_state.on_progress();
                 true
-            }else{
+            } else {
                 false
             }
         });
@@ -768,25 +908,57 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
             return Ok(SchedulingAction::ExecuteTimeoutCallback);
         }
         // No callbacks scheduled, pick a regular thread to execute.
+        // Or potentially request a different thread be scheduled.
+        let mut request_new_thread = None;
         if self.threads[self.active_thread].state == ThreadState::Enabled {
             if self.yield_active_thread {
                 // The currently active thread has yielded, update the state
-                if self.threads[self.active_thread].on_yield(self.max_yield_count) {
+                if self.threads[self.active_thread].on_yield(self.max_yield_count, self.active_thread, &mut self.thread_liveness) {
                     // The thread has a non-zero set of wake metadata to exit the yield
                     // so insert into the set of threads that may wake.
                     self.yielding_thread_set.insert(self.active_thread);
                 }
-            }else{
+            } else {
                 // The currently active thread is still enabled, just continue with it.
-                return Ok(SchedulingAction::ExecuteStep);
+                // Unless liveness requirements mandate that a new thread be executed.
+                let execute = if let Some(liveness_meta) = &mut self.thread_liveness {
+                    let current_thread = &mut self.threads[self.active_thread];
+                    if let Some(new_thread) = liveness_meta.should_swap_thread(current_thread.liveness_ops) {
+                        Some(new_thread)
+                    } else {
+                        liveness_meta.on_step(&mut current_thread.liveness_ops);
+                        None
+                    }
+                } else {
+                    None
+                };
+                if execute.is_some() {
+                    request_new_thread = execute;
+                } else {
+                    return Ok(SchedulingAction::ExecuteStep);
+                }
             }
         }
         // We need to pick a new thread for execution.
-        // First try to select a thread that has not yielded.
-        let new_thread = if let Some(new_thread) = self.threads.iter_enumerated()
+        // First select a thread requested by liveness.
+        // Then try to select a thread that has not yielded.
+        let new_thread = if let Some(new_thread) = request_new_thread {
+
+            // May wake up delay on yield thread, handle correctly.
+            let thread = &mut self.threads[new_thread];
+            if thread.state == ThreadState::DelayOnYield {
+
+                // Re-enable the thread and start the next yield iteration.
+                thread.state = ThreadState::Enabled;
+                thread.yield_state.start_iteration();
+                self.yielding_thread_set.remove(&new_thread);
+            }
+
+            request_new_thread
+        } else if let Some(new_thread) = self.threads.iter_enumerated()
             .find(|(_, thread)| thread.state == ThreadState::Enabled) {
             Some(new_thread.0)
-        }else{
+        } else {
             // No active threads, wake all non blocking yields and try again.
             let mut new_thread = None;
             for (id,thread) in self.threads.iter_enumerated_mut() {
@@ -805,11 +977,22 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
 
         // We found a valid thread to execute.
         if let Some(new_thread) = new_thread {
+            // De-schedule old thread
+            if let Some(liveness_meta) = &mut self.thread_liveness {
+                liveness_meta.deschedule_thread(self.active_thread,self.threads[self.active_thread].liveness_ops);
+            }
+
+            // Schedule new thread
             self.active_thread = new_thread;
+            assert_eq!(self.threads[self.active_thread].state, ThreadState::Enabled);
             if let Some(data_race) = data_race {
                 data_race.thread_set_active(self.active_thread);
             }
-            assert!(self.threads[self.active_thread].state == ThreadState::Enabled);
+            if let Some(liveness_meta) = &mut self.thread_liveness {
+                let ops = &mut self.threads[self.active_thread].liveness_ops;
+                liveness_meta.schedule_thread(self.active_thread, ops);
+                liveness_meta.on_step(ops);
+            }
             return Ok(SchedulingAction::ExecuteStep);
         }
 
