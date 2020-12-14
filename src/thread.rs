@@ -1,10 +1,10 @@
 //! Implements threads.
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, hash_map::Entry};
+use std::collections::{hash_map::Entry, BTreeSet};
 use std::convert::TryFrom;
-use std::rc::Rc;
 use std::num::TryFromIntError;
+use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
 use log::trace;
@@ -14,7 +14,7 @@ use rustc_hir::def_id::DefId;
 use rustc_index::vec::{Idx, IndexVec};
 use rustc_target::abi::Size;
 
-use crate::sync::{SynchronizationState, CondvarId};
+use crate::sync::{CondvarId, SynchronizationState};
 use crate::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,11 +125,9 @@ enum SyncObject {
     RwLock(RwLockId),
     /// Can query the if awaited.
     Condvar(CondvarId),
-
 }
 
 enum YieldRecordState {
-
     /// The thread has made progress and so the recording of
     /// states has terminated.
     /// A thread is considered to have made progress performs some
@@ -155,31 +153,27 @@ enum YieldRecordState {
         /// Map of synchronization objects that can have properties
         /// queried and are currently watched by this thread.
         watch_sync: FxHashMap<SyncObject, u32>,
-        
+
         /// The current iteration of the yield livelock loop
         /// recording, should always be less than or equal
         /// to the global live-lock loop counter.
         record_iteration: u32,
-    }
+    },
 }
 
 impl YieldRecordState {
-    
     /// Progress has been made on the thread.
     fn on_progress(&mut self) {
         *self = YieldRecordState::MadeProgress;
     }
-    
+
     /// Mark an atomic variable as watched.
     fn on_watch_atomic(&mut self, alloc_id: AllocId, alloc_size: Size, offset: Size, len: Size) {
-        if let YieldRecordState::Recording {
-            watch_atomic, record_iteration, ..
-        } = self {
-            let range_map = watch_atomic.entry(alloc_id)
-            .or_insert_with(|| RangeMap::new(alloc_size, 0));
+        if let YieldRecordState::Recording { watch_atomic, record_iteration, .. } = self {
+            let range_map =
+                watch_atomic.entry(alloc_id).or_insert_with(|| RangeMap::new(alloc_size, 0));
             let mut assume_progress = false;
-            range_map.iter_mut(offset, len)
-            .for_each(|(_, watch)| {
+            range_map.iter_mut(offset, len).for_each(|(_, watch)| {
                 if *watch != *record_iteration - 1 {
                     // Value stored does not match the last loop
                     // so assume some progress has been made.
@@ -197,13 +191,11 @@ impl YieldRecordState {
 
     /// Mark a synchronization object as watched.
     fn on_watch_sync(&mut self, sync: SyncObject) {
-        if let YieldRecordState::Recording {
-            watch_sync, record_iteration, ..
-        } = self {
+        if let YieldRecordState::Recording { watch_sync, record_iteration, .. } = self {
             let count = watch_sync.entry(sync).or_insert(0);
             if *count != *record_iteration - 1 {
                 // Different content - assume progress.
-                *self = YieldRecordState::MadeProgress; 
+                *self = YieldRecordState::MadeProgress;
             } else {
                 *count = *record_iteration;
             }
@@ -212,9 +204,7 @@ impl YieldRecordState {
 
     /// Returns true if the atomic variable is currently watched.
     fn should_wake_atomic(&self, alloc_id: AllocId, offset: Size, len: Size) -> bool {
-        if let YieldRecordState::Recording {
-            watch_atomic, ..
-        } = self {
+        if let YieldRecordState::Recording { watch_atomic, .. } = self {
             if let Some(range_map) = watch_atomic.get(&alloc_id) {
                 range_map.iter(offset, len).any(|(_, &watch)| watch != 0)
             } else {
@@ -229,14 +219,8 @@ impl YieldRecordState {
 
     /// Returns true if the sync object is currently watched.
     fn should_wake_sync(&self, sync: SyncObject) -> bool {
-        if let YieldRecordState::Recording {
-            watch_sync, ..
-        } = self {
-            if let Some(count) = watch_sync.get(&sync) {
-                *count != 0
-            } else {
-                false
-            }
+        if let YieldRecordState::Recording { watch_sync, .. } = self {
+            if let Some(count) = watch_sync.get(&sync) { *count != 0 } else { false }
         } else {
             // First iteration, no wake metadata.
             false
@@ -245,9 +229,7 @@ impl YieldRecordState {
 
     /// Returns the number of yield iterations that have been executed.
     fn get_iteration_count(&self) -> u32 {
-        if let YieldRecordState::Recording {
-            record_iteration, ..
-        } = self {
+        if let YieldRecordState::Recording { record_iteration, .. } = self {
             *record_iteration
         } else {
             0
@@ -255,9 +237,7 @@ impl YieldRecordState {
     }
 
     fn should_watch(&self) -> bool {
-        if let YieldRecordState::Recording {
-            watch_atomic, watch_sync, ..
-        } = self {
+        if let YieldRecordState::Recording { watch_atomic, watch_sync, .. } = self {
             // Should watch if either watch hash-set is non-empty
             !watch_atomic.is_empty() || !watch_sync.is_empty()
         } else {
@@ -267,15 +247,13 @@ impl YieldRecordState {
 
     /// Starts the next yield iteration
     fn start_iteration(&mut self) {
-        if let YieldRecordState::Recording {
-            record_iteration, ..
-        } = self {
+        if let YieldRecordState::Recording { record_iteration, .. } = self {
             *record_iteration += 1;
         } else {
             *self = YieldRecordState::Recording {
                 watch_atomic: FxHashMap::default(),
                 watch_sync: FxHashMap::default(),
-                record_iteration: 1
+                record_iteration: 1,
             }
         }
     }
@@ -327,15 +305,16 @@ impl<'mir, 'tcx> Thread<'mir, 'tcx> {
 
     /// Get the name of the current thread, or `<unnamed>` if it was not set.
     fn thread_name(&self) -> &[u8] {
-        if let Some(ref thread_name) = self.thread_name {
-            thread_name
-        } else {
-            b"<unnamed>"
-        }
+        if let Some(ref thread_name) = self.thread_name { thread_name } else { b"<unnamed>" }
     }
 
     /// Start the thread yielding. Returns true if this thread has watch metadata.
-    fn on_yield(&mut self, max_yield: u32, thread: ThreadId, meta: &mut Option<LivenessMetadata>) -> bool {
+    fn on_yield(
+        &mut self,
+        max_yield: u32,
+        thread: ThreadId,
+        meta: &mut Option<LivenessMetadata>,
+    ) -> bool {
         let iteration_count = self.yield_state.get_iteration_count();
         let block = if max_yield == 0 {
             // A value of 0 never blocks
@@ -357,7 +336,13 @@ impl<'mir, 'tcx> Thread<'mir, 'tcx> {
 
 impl<'mir, 'tcx> std::fmt::Debug for Thread<'mir, 'tcx> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}({:?}, {:?})", String::from_utf8_lossy(self.thread_name()), self.state, self.join_status)
+        write!(
+            f,
+            "{}({:?}, {:?})",
+            String::from_utf8_lossy(self.thread_name()),
+            self.state,
+            self.join_status
+        )
     }
 }
 
@@ -411,10 +396,8 @@ impl<'mir, 'tcx> std::fmt::Debug for TimeoutCallbackInfo<'mir, 'tcx> {
     }
 }
 
-
 #[derive(Debug)]
 struct LivenessMetadata {
-
     /// The maximum liveness.
     thread_liveness: u64,
 
@@ -428,11 +411,7 @@ struct LivenessMetadata {
 }
 impl LivenessMetadata {
     pub fn new(thread_liveness: u64) -> Self {
-        LivenessMetadata{
-            thread_liveness,
-            min_ops_cache: None,
-            liveness_set: BTreeSet::new()
-        }
+        LivenessMetadata { thread_liveness, min_ops_cache: None, liveness_set: BTreeSet::new() }
     }
 
     fn new_thread(&mut self, thread: ThreadId, liveness_ops: &mut Option<u128>) {
@@ -464,13 +443,11 @@ impl LivenessMetadata {
     /// to ensure fairness when a thread is blocking.
     fn min_counter(&mut self) -> u128 {
         let liveness_set = &mut self.liveness_set;
-        let ops = self.min_ops_cache.or_else(|| {
-            liveness_set.first().map(|(ops,_)| *ops)
-        });
+        let ops = self.min_ops_cache.or_else(|| liveness_set.first().map(|(ops, _)| *ops));
         if let Some(ops) = ops {
             self.min_ops_cache = Some(ops);
             ops
-        }else{
+        } else {
             0
         }
     }
@@ -482,7 +459,7 @@ impl LivenessMetadata {
             self.min_ops_cache = None;
         }
     }
-    
+
     /// Called when a thread is selected for execution.
     fn schedule_thread(&mut self, thread: ThreadId, liveness_ops: &mut Option<u128>) {
         if let Some(liveness_ops) = *liveness_ops {
@@ -498,19 +475,16 @@ impl LivenessMetadata {
     fn should_swap_thread(&mut self, current_ops: Option<u128>) -> Option<ThreadId> {
         if let Some(current_ops) = current_ops {
             let liveness_set = &mut self.liveness_set;
-            let ops = self.min_ops_cache.or_else(|| {
-                liveness_set.first().map(|(ops,_)| *ops)
-            });
+            let ops = self.min_ops_cache.or_else(|| liveness_set.first().map(|(ops, _)| *ops));
             if let Some(ops) = ops {
                 self.min_ops_cache = Some(ops);
                 if current_ops >= ops {
                     let diff = current_ops - ops;
                     if diff > self.thread_liveness as u128 {
-
                         // A thread has crossed the required liveness bound
                         let (min_ops, thread) = *liveness_set.first().unwrap();
                         assert_eq!(min_ops, ops);
-                        return Some(thread)
+                        return Some(thread);
                     }
                 }
             }
@@ -562,9 +536,7 @@ impl<'mir, 'tcx> ThreadManager<'mir, 'tcx> {
             threads: threads,
             yielding_thread_set: FxHashSet::default(),
             max_yield_count,
-            thread_liveness: thread_liveness.map(|liveness| {
-                LivenessMetadata::new(liveness)
-            }),
+            thread_liveness: thread_liveness.map(|liveness| LivenessMetadata::new(liveness)),
             sync: SynchronizationState::default(),
             thread_local_alloc_ids: Default::default(),
             yield_active_thread: false,
@@ -661,7 +633,11 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
     }
 
     /// Mark that the active thread tries to join the thread with `joined_thread_id`.
-    fn join_thread(&mut self, joined_thread_id: ThreadId, data_race: &Option<Rc<data_race::GlobalState>>) -> InterpResult<'tcx> {
+    fn join_thread(
+        &mut self,
+        joined_thread_id: ThreadId,
+        data_race: &Option<Rc<data_race::GlobalState>>,
+    ) -> InterpResult<'tcx> {
         if self.threads[joined_thread_id].join_status != ThreadJoinStatus::Joinable {
             throw_ub_format!("trying to join a detached or already joined thread");
         }
@@ -679,7 +655,7 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
         self.threads[joined_thread_id].join_status = ThreadJoinStatus::Joined;
         if self.threads[joined_thread_id].state != ThreadState::Terminated {
             // The joined thread is still running, we need to wait for it.
-            let active_thread =  &mut self.threads[self.active_thread];
+            let active_thread = &mut self.threads[self.active_thread];
             active_thread.state = ThreadState::BlockedOnJoin(joined_thread_id);
             if let Some(liveness_meta) = &mut self.thread_liveness {
                 liveness_meta.on_thread_blocked(joined_thread_id, &mut active_thread.liveness_ops);
@@ -760,10 +736,11 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
         // this allows us to have a deterministic scheduler.
         for thread in self.threads.indices() {
             match self.timeout_callbacks.entry(thread) {
-                Entry::Occupied(entry) =>
+                Entry::Occupied(entry) => {
                     if entry.get().call_time.get_wait_time() == Duration::new(0, 0) {
                         return Some((thread, entry.remove().callback));
-                    },
+                    }
+                }
                 Entry::Vacant(_) => {}
             }
         }
@@ -772,7 +749,10 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
 
     /// Wakes up threads joining on the active one and deallocates thread-local statics.
     /// The `AllocId` that can now be freed is returned.
-    fn thread_terminated(&mut self, data_race: &Option<Rc<data_race::GlobalState>>) -> Vec<AllocId> {
+    fn thread_terminated(
+        &mut self,
+        data_race: &Option<Rc<data_race::GlobalState>>,
+    ) -> Vec<AllocId> {
         let mut free_tls_statics = Vec::new();
         {
             let mut thread_local_statics = self.thread_local_alloc_ids.borrow_mut();
@@ -793,7 +773,10 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
         }
         if let Some(liveness_meta) = &mut self.thread_liveness {
             // For liveness - blocking & termination are the same operation.
-            liveness_meta.on_thread_blocked(self.active_thread, &mut self.threads[self.active_thread].liveness_ops);
+            liveness_meta.on_thread_blocked(
+                self.active_thread,
+                &mut self.threads[self.active_thread].liveness_ops,
+            );
         }
         // Check if we need to unblock any threads.
         for (i, thread) in self.threads.iter_enumerated_mut() {
@@ -841,8 +824,16 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
     /// an atomic read operation and may want
     /// to mark that variable as watched to wake
     /// the current yield.
-    fn thread_yield_atomic_watch(&mut self, alloc_id: AllocId, alloc_size: Size, offset: Size, len: Size) {
-        self.threads[self.active_thread].yield_state.on_watch_atomic(alloc_id, alloc_size, offset, len)
+    fn thread_yield_atomic_watch(
+        &mut self,
+        alloc_id: AllocId,
+        alloc_size: Size,
+        offset: Size,
+        len: Size,
+    ) {
+        self.threads[self.active_thread]
+            .yield_state
+            .on_watch_atomic(alloc_id, alloc_size, offset, len)
     }
 
     fn thread_yield_sync_wake(&mut self, sync: SyncObject) {
@@ -874,7 +865,10 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
     /// used in stateless model checkers such as Loom: run the active thread as
     /// long as we can and switch only when we have to (the active thread was
     /// blocked, terminated, or has explicitly asked to be preempted).
-    fn schedule(&mut self, data_race: &Option<Rc<data_race::GlobalState>>) -> InterpResult<'tcx, SchedulingAction> {
+    fn schedule(
+        &mut self,
+        data_race: &Option<Rc<data_race::GlobalState>>,
+    ) -> InterpResult<'tcx, SchedulingAction> {
         // Check whether the thread has **just** terminated (`check_terminated`
         // checks whether the thread has popped all its stack and if yes, sets
         // the thread state to terminated).
@@ -913,7 +907,11 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
         if self.threads[self.active_thread].state == ThreadState::Enabled {
             if self.yield_active_thread {
                 // The currently active thread has yielded, update the state
-                if self.threads[self.active_thread].on_yield(self.max_yield_count, self.active_thread, &mut self.thread_liveness) {
+                if self.threads[self.active_thread].on_yield(
+                    self.max_yield_count,
+                    self.active_thread,
+                    &mut self.thread_liveness,
+                ) {
                     // The thread has a non-zero set of wake metadata to exit the yield
                     // so insert into the set of threads that may wake.
                     self.yielding_thread_set.insert(self.active_thread);
@@ -923,7 +921,9 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
                 // Unless liveness requirements mandate that a new thread be executed.
                 let execute = if let Some(liveness_meta) = &mut self.thread_liveness {
                     let current_thread = &mut self.threads[self.active_thread];
-                    if let Some(new_thread) = liveness_meta.should_swap_thread(current_thread.liveness_ops) {
+                    if let Some(new_thread) =
+                        liveness_meta.should_swap_thread(current_thread.liveness_ops)
+                    {
                         Some(new_thread)
                     } else {
                         liveness_meta.on_step(&mut current_thread.liveness_ops);
@@ -943,11 +943,9 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
         // First select a thread requested by liveness.
         // Then try to select a thread that has not yielded.
         let new_thread = if let Some(new_thread) = request_new_thread {
-
             // May wake up delay on yield thread, handle correctly.
             let thread = &mut self.threads[new_thread];
             if thread.state == ThreadState::DelayOnYield {
-
                 // Re-enable the thread and start the next yield iteration.
                 thread.state = ThreadState::Enabled;
                 thread.yield_state.start_iteration();
@@ -955,15 +953,15 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
             }
 
             request_new_thread
-        } else if let Some(new_thread) = self.threads.iter_enumerated()
-            .find(|(_, thread)| thread.state == ThreadState::Enabled) {
+        } else if let Some(new_thread) =
+            self.threads.iter_enumerated().find(|(_, thread)| thread.state == ThreadState::Enabled)
+        {
             Some(new_thread.0)
         } else {
             // No active threads, wake all non blocking yields and try again.
             let mut new_thread = None;
-            for (id,thread) in self.threads.iter_enumerated_mut() {
+            for (id, thread) in self.threads.iter_enumerated_mut() {
                 if thread.state == ThreadState::DelayOnYield {
-
                     // Re-enable the thread and start the next yield iteration.
                     thread.state = ThreadState::Enabled;
                     thread.yield_state.start_iteration();
@@ -979,7 +977,10 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
         if let Some(new_thread) = new_thread {
             // De-schedule old thread
             if let Some(liveness_meta) = &mut self.thread_liveness {
-                liveness_meta.deschedule_thread(self.active_thread,self.threads[self.active_thread].liveness_ops);
+                liveness_meta.deschedule_thread(
+                    self.active_thread,
+                    self.threads[self.active_thread].liveness_ops,
+                );
             }
 
             // Schedule new thread
@@ -1020,7 +1021,10 @@ impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriEvalContext<'mi
 pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx> {
     /// Get a thread-specific allocation id for the given thread-local static.
     /// If needed, allocate a new one.
-    fn get_or_create_thread_local_alloc_id(&mut self, def_id: DefId) -> InterpResult<'tcx, AllocId> {
+    fn get_or_create_thread_local_alloc_id(
+        &mut self,
+        def_id: DefId,
+    ) -> InterpResult<'tcx, AllocId> {
         let this = self.eval_context_mut();
         let tcx = this.tcx;
         if let Some(new_alloc_id) = this.machine.threads.get_thread_local_alloc_id(def_id) {
@@ -1036,7 +1040,8 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
             }
             let allocation = tcx.eval_static_initializer(def_id)?;
             // Create a fresh allocation with this content.
-            let new_alloc_id = this.memory.allocate_with(allocation.clone(), MiriMemoryKind::Tls.into()).alloc_id;
+            let new_alloc_id =
+                this.memory.allocate_with(allocation.clone(), MiriMemoryKind::Tls.into()).alloc_id;
             this.machine.threads.set_thread_local_alloc_id(def_id, new_alloc_id);
             Ok(new_alloc_id)
         }
@@ -1128,9 +1133,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
         let this = self.eval_context_mut();
         if let Some(data_race) = &this.memory.extra.data_race {
             if let Ok(string) = String::from_utf8(new_thread_name.clone()) {
-                data_race.thread_set_name(
-                    this.machine.threads.active_thread, string
-                );
+                data_race.thread_set_name(this.machine.threads.active_thread, string);
             }
         }
         this.machine.threads.set_thread_name(new_thread_name);
@@ -1288,7 +1291,13 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
     /// to mark that variable as watched to wake
     /// the current yield.
     #[inline]
-    fn thread_yield_atomic_watch(&mut self, alloc_id: AllocId, alloc_size: Size, offset: Size, len: Size) {
+    fn thread_yield_atomic_watch(
+        &mut self,
+        alloc_id: AllocId,
+        alloc_size: Size,
+        offset: Size,
+        len: Size,
+    ) {
         let this = self.eval_context_mut();
         this.machine.threads.thread_yield_atomic_watch(alloc_id, alloc_size, offset, len);
     }
