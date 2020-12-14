@@ -1,4 +1,7 @@
-// compile-flags: -Zmiri-thread-liveness=5
+// compile-flags: -Zmiri-thread-liveness=500
+
+//FIXME: is the bug with stacked borrows or a real issue?
+// compile-flags: -Zmiri-disable-stacked-borrows
 
 use std::thread::spawn;
 

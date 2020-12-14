@@ -399,35 +399,48 @@ impl<'mir, 'tcx> std::fmt::Debug for TimeoutCallbackInfo<'mir, 'tcx> {
 #[derive(Debug)]
 struct LivenessMetadata {
     /// The maximum liveness.
+    /// The maximum number of operations that 1 thread can perform
+    /// before all other threads must perform at least 1 operation.
+    /// Time spend while a thread is blocked is not included.
     thread_liveness: u64,
 
     /// Cache of the minimum operation count in liveness_set.
+    /// Keeps the common case of executing a step with no
+    /// thread change O(1).
     min_ops_cache: Option<u128>,
 
     /// BinaryHeap of the liveness of threads currently not
     /// active but enabled or non-blocking yielded.
-    /// Threads that are currently blocked are
+    /// Threads that are currently blocked are not included
+    /// in this liveness set.
     liveness_set: BTreeSet<(u128, ThreadId)>,
 }
 impl LivenessMetadata {
+
+    /// Create a new metadata object with associated data.
     pub fn new(thread_liveness: u64) -> Self {
         LivenessMetadata { thread_liveness, min_ops_cache: None, liveness_set: BTreeSet::new() }
     }
 
-    fn new_thread(&mut self, thread: ThreadId, liveness_ops: &mut Option<u128>) {
-        let min = self.min_counter();
+    /// Create a new thread and assign an initial liveness counter.
+    fn new_thread(&mut self, thread: ThreadId, liveness_ops: &mut Option<u128>, current_liveness: Option<u128>) {
+        let min = self.min_counter(current_liveness);
         *liveness_ops = Some(min);
         self.liveness_set.insert((min, thread));
+        log::info!("Create new thread with liveness: {:?} = {:?}", thread, *liveness_ops);
+        log::info!("Thread liveness set = {:?}",self.liveness_set);
     }
 
     /// Executed when a thread becomes blocked and so is no
     /// longer considered for liveness.
     fn on_thread_blocked(&mut self, thread: ThreadId, liveness_ops: &mut Option<u128>) {
+        log::info!("Stop tracking thread liveness = {:?}", thread);
         if let Some(liveness) = *liveness_ops {
             // May be present if not currently executing, remove.
             self.liveness_set.remove(&(liveness, thread));
         }
         *liveness_ops = None;
+        log::info!("Thread liveness set = {:?}",self.liveness_set);
     }
 
     /// Increment the threads liveness counter when an operation is executed.
@@ -435,39 +448,46 @@ impl LivenessMetadata {
         if let Some(counter) = thread_counter {
             *counter += 1;
         } else {
-            *thread_counter = Some(self.min_counter())
+            // No current active liveness, so arg = None.
+            *thread_counter = Some(self.min_counter(None))
         }
     }
 
     /// Return the minimum active counter, used
     /// to ensure fairness when a thread is blocking.
-    fn min_counter(&mut self) -> u128 {
+    fn min_counter(&mut self, current: Option<u128>) -> u128 {
         let liveness_set = &mut self.liveness_set;
         let ops = self.min_ops_cache.or_else(|| liveness_set.first().map(|(ops, _)| *ops));
         if let Some(ops) = ops {
             self.min_ops_cache = Some(ops);
             ops
         } else {
-            0
+            current.unwrap_or(0)
         }
     }
 
     /// Called when a thread has stopped executing but was not blocked.
     pub fn deschedule_thread(&mut self, thread: ThreadId, liveness_ops: Option<u128>) {
+        log::info!("Deschedule thread with liveness: {:?} = {:?}", thread, liveness_ops);
         if let Some(liveness_ops) = liveness_ops {
             self.liveness_set.insert((liveness_ops, thread));
             self.min_ops_cache = None;
         }
+        log::info!("Thread liveness set = {:?}",self.liveness_set);
     }
 
-    /// Called when a thread is selected for execution.
+    /// Called when a thread is selected for execution. Assigns a new index
+    /// if a thread has no current liveness index.
     fn schedule_thread(&mut self, thread: ThreadId, liveness_ops: &mut Option<u128>) {
+        log::info!("Schedule thread with liveness: {:?} = {:?}", thread, liveness_ops);
         if let Some(liveness_ops) = *liveness_ops {
             assert!(self.liveness_set.remove(&(liveness_ops, thread)));
             self.min_ops_cache = None;
         } else {
-            *liveness_ops = Some(self.min_counter());
+            // There is no current active liveness, so argument = None.
+            *liveness_ops = Some(self.min_counter(None));
         }
+        log::info!("Thread liveness set = {:?}",self.liveness_set);
     }
 
     /// Returns the thread id that should be newly executed if required
@@ -484,6 +504,7 @@ impl LivenessMetadata {
                         // A thread has crossed the required liveness bound
                         let (min_ops, thread) = *liveness_set.first().unwrap();
                         assert_eq!(min_ops, ops);
+                        log::info!("Liveness request change to thread: {:?} = {:?} with delta = {:?}", thread, ops, diff);
                         return Some(thread);
                     }
                 }
@@ -578,16 +599,23 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
         let new_thread_id = ThreadId::new(self.threads.len());
         self.threads.push(Default::default());
         if let Some(meta) = &mut self.thread_liveness {
-            meta.new_thread(new_thread_id, &mut self.threads[new_thread_id].liveness_ops);
+            let current_liveness = self.threads[self.active_thread].liveness_ops;
+            meta.new_thread(new_thread_id, &mut self.threads[new_thread_id].liveness_ops, current_liveness);
         }
         new_thread_id
     }
 
     /// Set an active thread and return the id of the thread that was active before.
     fn set_active_thread_id(&mut self, id: ThreadId) -> ThreadId {
+        if let Some(liveness_meta) = &mut self.thread_liveness {
+            liveness_meta.deschedule_thread(self.active_thread, self.threads[self.active_thread].liveness_ops);
+        }
         let active_thread_id = self.active_thread;
         self.active_thread = id;
         assert!(self.active_thread.index() < self.threads.len());
+        if let Some(liveness_meta) = &mut self.thread_liveness {
+            liveness_meta.schedule_thread(self.active_thread, &mut self.threads[self.active_thread].liveness_ops);
+        }
         active_thread_id
     }
 
